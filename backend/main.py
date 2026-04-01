@@ -19,10 +19,7 @@ from .models import (
 app = FastAPI(title="Digital Wellness Assistant API")
 
 # Allow local frontend during development
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -120,6 +117,59 @@ async def create_event(
     return {"status": "ok"}
 
 
+# ── NEW: Save posture calibration baseline to the backend ──────────
+
+@app.post("/posture/calibration")
+async def save_posture_calibration(
+    calibration: dict,
+    client_id: str = Depends(get_client_id),
+    db: DbSession = Depends(get_db),
+):
+    """
+    Stores the user's personal posture baseline (neck, slouch, neckStd, slouchStd)
+    as an event so it can be restored on any device or after clearing localStorage.
+    """
+    ev = Event(
+        client_id=client_id,
+        session_id=None,
+        event_type="posture_calibration",
+        payload_json=json.dumps(calibration),
+    )
+    db.add(ev)
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.get("/posture/calibration")
+async def get_posture_calibration(
+    client_id: str = Depends(get_client_id),
+    db: DbSession = Depends(get_db),
+):
+    """
+    Returns the most recent posture calibration baseline for this user.
+    The frontend can use this to skip recalibration if a profile already exists.
+    """
+    stmt = (
+        select(Event)
+        .where(
+            Event.client_id == client_id,
+            Event.event_type == "posture_calibration",
+        )
+        .order_by(Event.created_at.desc())  # type: ignore
+        .limit(1)
+    )
+    result = db.exec(stmt).first()
+    if not result:
+        return {"calibration": None}
+
+    try:
+        payload = json.loads(result.payload_json)
+    except Exception:
+        return {"calibration": None}
+
+    return {"calibration": payload, "calibrated_at": result.created_at.isoformat()}
+
+
 @app.get("/analytics/summary", response_model=SummaryStats)
 async def analytics_summary(
     days: int = 1,
@@ -140,6 +190,7 @@ async def analytics_summary(
     good_posture_count = 0
     distance_events = 0
     safe_distance_count = 0
+    posture_alerts = 0  # NEW: track how many times adaptive alerts fired
 
     for ev in events:
         if ev.event_type == "focus_cycle_completed":
@@ -168,6 +219,10 @@ async def analytics_summary(
             if payload.get("state") == "ok":
                 safe_distance_count += 1
 
+        # NEW: count posture alert events from the adaptive system
+        elif ev.event_type == "posture_alert":
+            posture_alerts += 1
+
     good_posture_ratio = (
         good_posture_count / posture_events if posture_events > 0 else 0.0
     )
@@ -183,4 +238,3 @@ async def analytics_summary(
         distance_events=distance_events,
         safe_distance_ratio=round(safe_distance_ratio, 2),
     )
-

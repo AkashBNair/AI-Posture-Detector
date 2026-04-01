@@ -1,0 +1,142 @@
+from flask_cors import CORS
+from flask import Flask, request, jsonify
+import sqlite3
+from datetime import datetime
+
+app = Flask(__name__)
+DB = "wellness.db"
+
+
+def get_db():
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# ✅ CREATE TABLES IF NOT EXIST
+def init_db():
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT,
+        client_id TEXT,
+        started_at TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT,
+        session_id INTEGER,
+        payload TEXT,
+        created_at TEXT
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+app = Flask(__name__)
+CORS(app)
+
+
+# ✅ START SESSION
+@app.route('/sessions', methods=['POST'])
+def start_session():
+    data = request.json
+    client_id = request.headers.get('X-Client-Id')
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT INTO sessions (type, client_id, started_at) VALUES (?, ?, ?)",
+        (data.get("type"), client_id, datetime.utcnow().isoformat())
+    )
+
+    session_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    return jsonify({"id": session_id})
+
+
+# ✅ POST EVENT
+@app.route('/events', methods=['POST'])
+def post_event():
+    data = request.json
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT INTO events (event_type, session_id, payload, created_at) VALUES (?, ?, ?, ?)",
+        (
+            data.get("event_type"),
+            data.get("session_id"),
+            str(data.get("payload")),
+            datetime.utcnow().isoformat()
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({"status": "ok"})
+
+
+# 🔥 ANALYTICS ROUTE (YOUR MAIN FEATURE)
+@app.route('/analytics', methods=['GET'])
+def get_analytics():
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM events")
+    rows = cur.fetchall()
+
+    posture_data = {}
+    focus_data = {}
+
+    for row in rows:
+        date = row["created_at"][:10]
+
+        if date not in posture_data:
+            posture_data[date] = {"good": 0, "bad": 0}
+
+        if row["event_type"] == "posture_state":
+            if "good" in row["payload"]:
+                posture_data[date]["good"] += 1
+            else:
+                posture_data[date]["bad"] += 1
+
+        if row["event_type"] == "focus_cycle_completed":
+            if date not in focus_data:
+                focus_data[date] = 0
+            focus_data[date] += 1
+
+    # FORMAT DATA
+    posture_result = []
+    for day, val in posture_data.items():
+        total = val["good"] + val["bad"]
+        score = int((val["good"] / total) * 100) if total else 0
+        posture_result.append({"day": day, "score": score})
+
+    focus_result = [{"day": k, "minutes": v * 25} for k, v in focus_data.items()]
+
+    conn.close()
+
+    return jsonify({
+        "posture": posture_result,
+        "focus": focus_result,
+    })
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
