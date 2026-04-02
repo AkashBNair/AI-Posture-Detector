@@ -5,9 +5,11 @@ from datetime import datetime
 import time
 
 app = Flask(__name__)
+from flask import render_template
+
 @app.route("/")
 def home():
-    return "AI Posture Detector is Running 🚀"
+    return render_template("index.html")
 CORS(app)
 
 DB = "wellness.db"
