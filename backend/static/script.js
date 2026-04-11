@@ -1,34 +1,17 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>AI Posture Detector</title>
-</head>
-<body>
-
-<h1>🧠 AI Posture Detector</h1>
-
-<video id="video" width="500" autoplay playsinline></video>
-<canvas id="canvas" width="500" height="500"></canvas>
-
-<!-- MediaPipe AI -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
-
-<script>
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 
-// Start camera
+// Start webcam
 navigator.mediaDevices.getUserMedia({ video: true })
 .then(stream => {
     video.srcObject = stream;
 })
 .catch(err => {
-    alert("Camera access denied ❌");
+    alert("Camera not working ❌");
 });
 
-// Initialize AI
+// Load MediaPipe Pose
 const pose = new Pose({
     locateFile: (file) => {
         return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
@@ -41,14 +24,14 @@ pose.setOptions({
     enableSegmentation: false
 });
 
-// AI results
+// When AI gives results
 pose.onResults(results => {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // Draw video
     ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
 
-    // Draw body points
+    // Draw skeleton points
     if (results.poseLandmarks) {
         for (let lm of results.poseLandmarks) {
             ctx.beginPath();
@@ -69,7 +52,3 @@ const camera = new Camera(video, {
 });
 
 camera.start();
-</script>
-
-</body>
-</html>
