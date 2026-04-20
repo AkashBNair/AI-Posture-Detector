@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { alert as wellnessAlert } from '../utils/notifications';
 
 type Props = {
@@ -24,7 +24,7 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationComplete }) => {
     return () => document.removeEventListener("click", unlock);
   }, []);
 
-  function fireHydrationAlert() {
+  const fireHydrationAlert = useCallback(() => {
     if (alertFiredRef.current) return;
     alertFiredRef.current = true;
 
@@ -40,7 +40,7 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationComplete }) => {
     onHydrationComplete?.();
 
     setTimeout(() => setIsAlertPlaying(false), 5000);
-  }
+  }, [onHydrationComplete]);
 
   useEffect(() => {
     if (!isRunning) return;
@@ -61,7 +61,7 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationComplete }) => {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isRunning, minutesInput]);
+  }, [isRunning, minutesInput, fireHydrationAlert]);
 
   const minutes = Math.floor(timeLeft / 60);
   const seconds = timeLeft % 60;

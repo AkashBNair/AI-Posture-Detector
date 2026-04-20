@@ -1,7 +1,5 @@
 import React, { useEffect, useState } from "react";
 import {
-  LineChart,
-  Line,
   XAxis,
   YAxis,
   Tooltip,
@@ -101,8 +99,6 @@ export const AnalyticsDashboard: React.FC<Props> = ({
     ? postureData.find(d => d.name === 'Good')?.value || 0
     : 0;
 
-  const bestDay = null;
-
   // 🤖 AI Insight
   let aiInsight = "Collecting data...";
 
@@ -144,6 +140,7 @@ export const AnalyticsDashboard: React.FC<Props> = ({
         <Card title="Focus Sessions" value={focusData.length > 0 ? (focusData.find(d => d.name === 'Focus Sessions')?.value || 0).toString() : "0"} />
         <Card title="Focus Phase" value={phase} />
         <Card title="Eye Safety" value={eyeAlerts} />
+        <Card title="Hydration Interval" value={`${hydrationMinutes} min`} />
         {/* 🥛 NEW: Water Glasses Card */}
         <Card title="💧 Water Glasses" value={`${waterGlasses} 🥛`} />
       </div>

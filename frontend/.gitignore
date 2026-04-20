@@ -11,6 +11,7 @@
 # production
 /build
 /build_render_check
+/build_ci_check
 /vite-project
 
 # misc
