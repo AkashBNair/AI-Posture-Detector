@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ai-posture-detector
+    env: python
+    buildCommand: |
+      pip install -r requirements.txt
+      npm --prefix frontend install
+      npm --prefix frontend run build
+    startCommand: gunicorn backend.server:app --bind 0.0.0.0:$PORT
