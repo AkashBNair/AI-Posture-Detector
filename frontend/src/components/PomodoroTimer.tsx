@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { alert as wellnessAlert } from '../utils/notifications';
+import {
+  onTimerComplete,
+  onTimerTick,
+  removeTimerCallbacks,
+  startBackgroundTimer,
+  stopBackgroundTimer,
+} from '../utils/notifications';
 
 type Phase = 'idle' | 'focus' | 'short_break' | 'long_break';
 
@@ -13,6 +19,7 @@ const DEFAULT_FOCUS_MIN = 25;
 const DEFAULT_SHORT_BREAK_MIN = 5;
 const DEFAULT_LONG_BREAK_MIN = 15;
 const LONG_BREAK_INTERVAL = 4;
+const POMODORO_TIMER_ID = 'pomodoro-phase';
 
 export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   onPhaseChange,
@@ -27,6 +34,7 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   const [completedFocusBlocks, setCompletedFocusBlocks] = useState(0);
   const [running, setRunning] = useState(false);
   const [phaseStartTimestamp, setPhaseStartTimestamp] = useState<number | null>(null);
+  const [phaseCompletionSignal, setPhaseCompletionSignal] = useState(0);
 
   useEffect(() => {
     onPhaseChange?.(phase);
@@ -40,19 +48,56 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   }, [secondsLeft, phase, running, onBreakTick]);
 
   useEffect(() => {
-    let interval: number | undefined;
-
-    if (running && secondsLeft > 0) {
-      interval = window.setInterval(() => setSecondsLeft((prev) => prev - 1), 1000);
-    } else if (running && secondsLeft === 0 && phase !== 'idle') {
-      handlePhaseEnd();
-    }
+    onTimerComplete(POMODORO_TIMER_ID, () => {
+      setPhaseCompletionSignal((prev) => prev + 1);
+    });
+    onTimerTick(POMODORO_TIMER_ID, (_timerId, nextSecondsLeft) => {
+      setSecondsLeft(nextSecondsLeft);
+    });
 
     return () => {
-      if (interval !== undefined) window.clearInterval(interval);
+      removeTimerCallbacks(POMODORO_TIMER_ID);
+      stopBackgroundTimer(POMODORO_TIMER_ID);
     };
+  }, []);
+
+  useEffect(() => {
+    if (phase === 'idle') return;
+    handlePhaseEnd();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, secondsLeft, phase]);
+  }, [phaseCompletionSignal]);
+
+  const getPhaseEndAlert = (activePhase: Phase) => {
+    if (activePhase === 'focus') {
+      const nextCount = completedFocusBlocks + 1;
+      const useLongBreak = nextCount % LONG_BREAK_INTERVAL === 0;
+      const breakMin = useLongBreak ? longBreakMinutes : shortBreakMinutes;
+      return {
+        title: '⏸️ Break Time!',
+        body: `Great work! Take a ${breakMin}-minute ${useLongBreak ? 'long' : 'short'} break. Screen is locked.`,
+        voiceMessage: `Focus session complete. Time for a ${breakMin} minute break.`,
+        tag: 'break-start',
+        soundName: 'break-start',
+      };
+    }
+
+    return {
+      title: '🚀 Focus Time!',
+      body: `Break is over! Time to get back to work. Stay focused for ${focusMinutes} minutes.`,
+      voiceMessage: `Break is over. Time to focus for ${focusMinutes} minutes.`,
+      tag: 'focus-start',
+      soundName: 'focus-start',
+    };
+  };
+
+  const startPhaseTimer = (activePhase: Phase, durationSeconds: number) => {
+    startBackgroundTimer(
+      POMODORO_TIMER_ID,
+      durationSeconds * 1000,
+      getPhaseEndAlert(activePhase),
+      false
+    );
+  };
 
   const handlePhaseEnd = () => {
     setRunning(false);
@@ -76,24 +121,9 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
       setCompletedFocusBlocks(nextCount);
       const useLongBreak = nextCount % LONG_BREAK_INTERVAL === 0;
       const breakType = useLongBreak ? 'long_break' : 'short_break';
-      const breakMin = useLongBreak ? longBreakMinutes : shortBreakMinutes;
-
-      // 🔔 Notify: Focus session ended, break starting
-      wellnessAlert('⏸️ Break Time!', {
-        body: `Great work! Take a ${breakMin}-minute ${useLongBreak ? 'long' : 'short'} break. Screen is locked.`,
-        voiceMessage: `Focus session complete. Time for a ${breakMin} minute break.`,
-        tag: 'break-start',
-      });
 
       startPhase(breakType);
     } else if (phase === 'short_break' || phase === 'long_break') {
-      // 🔔 Notify: Break ended, focus starting
-      wellnessAlert('🚀 Focus Time!', {
-        body: `Break is over! Time to get back to work. Stay focused for ${focusMinutes} minutes.`,
-        voiceMessage: `Break is over. Time to focus for ${focusMinutes} minutes.`,
-        tag: 'focus-start',
-      });
-
       startPhase('focus');
     }
   };
@@ -108,6 +138,7 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
     setSecondsLeft(durationMinutes * 60);
     setRunning(true);
     setPhaseStartTimestamp(Date.now());
+    startPhaseTimer(nextPhase, durationMinutes * 60);
   };
 
   const handleStart = () => {
@@ -115,12 +146,17 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
     else {
       setRunning(true);
       setPhaseStartTimestamp(Date.now());
+      startPhaseTimer(phase, secondsLeft);
     }
   };
 
-  const handlePause = () => setRunning(false);
+  const handlePause = () => {
+    setRunning(false);
+    stopBackgroundTimer(POMODORO_TIMER_ID);
+  };
 
   const handleReset = () => {
+    stopBackgroundTimer(POMODORO_TIMER_ID);
     setRunning(false);
     setPhase('idle');
     setSecondsLeft(0);

@@ -163,6 +163,7 @@ async function preloadSounds() {
 // ══════════════════════════════════════════════════════════════════
 
 let swRegistration: ServiceWorkerRegistration | null = null;
+const pendingSwMessages: any[] = [];
 
 // Callbacks that components register to receive SW messages
 type TimerCompleteCallback = (timerId: string, alertConfig: any) => void;
@@ -170,6 +171,43 @@ type TimerTickCallback = (timerId: string, secondsLeft: number) => void;
 
 const timerCompleteCallbacks: Map<string, TimerCompleteCallback> = new Map();
 const timerTickCallbacks: Map<string, TimerTickCallback> = new Map();
+const queuedSpeechMessages: string[] = [];
+
+function flushQueuedSpeech() {
+  if (!queuedSpeechMessages.length) return;
+  const latestMessage = queuedSpeechMessages[queuedSpeechMessages.length - 1];
+  queuedSpeechMessages.length = 0;
+  if (latestMessage) {
+    setTimeout(() => speak(latestMessage), 150);
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      flushQueuedSpeech();
+    }
+  });
+}
+
+function speakWhenPossible(message: string) {
+  if (!message) return;
+  if (typeof document !== 'undefined' && document.hidden) {
+    queuedSpeechMessages.push(message);
+    return;
+  }
+  speak(message);
+}
+
+function flushPendingSWMessages() {
+  const target = swRegistration?.active || navigator.serviceWorker?.controller;
+  if (!target || !pendingSwMessages.length) return;
+
+  while (pendingSwMessages.length > 0) {
+    const message = pendingSwMessages.shift();
+    target.postMessage(message);
+  }
+}
 
 export async function registerServiceWorker(): Promise<void> {
   if (!('serviceWorker' in navigator)) {
@@ -179,6 +217,9 @@ export async function registerServiceWorker(): Promise<void> {
 
   try {
     swRegistration = await navigator.serviceWorker.register('/sw.js');
+    const readyRegistration = await navigator.serviceWorker.ready;
+    swRegistration = readyRegistration;
+    flushPendingSWMessages();
     console.log('✅ Service Worker registered — background timers enabled');
 
     // Listen for messages FROM the Service Worker
@@ -189,7 +230,13 @@ export async function registerServiceWorker(): Promise<void> {
         // Play sound + voice when timer completes
         const soundName = data.alertConfig?.soundName || 'alert';
         playSound(soundName);
-        setTimeout(() => speak(data.alertConfig?.voiceMessage || data.alertConfig?.title || ''), 800);
+        setTimeout(
+          () =>
+            speakWhenPossible(
+              data.alertConfig?.voiceMessage || data.alertConfig?.title || ''
+            ),
+          800
+        );
 
         // Notify registered callback
         const cb = timerCompleteCallbacks.get(data.timerId);
@@ -205,6 +252,10 @@ export async function registerServiceWorker(): Promise<void> {
         // Timer was stopped
       }
     });
+
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      flushPendingSWMessages();
+    });
   } catch (err) {
     console.warn('Service Worker registration failed:', err);
   }
@@ -213,13 +264,21 @@ export async function registerServiceWorker(): Promise<void> {
 // ── Send message to Service Worker ────────────────────────────────
 
 function sendToSW(message: any) {
-  if (swRegistration?.active) {
-    swRegistration.active.postMessage(message);
-  } else if (navigator.serviceWorker?.controller) {
-    navigator.serviceWorker.controller.postMessage(message);
-  } else {
-    console.warn('No active Service Worker — timer will only work in foreground');
+  const target = swRegistration?.active || navigator.serviceWorker?.controller;
+  if (target) {
+    target.postMessage(message);
+    return;
   }
+
+  pendingSwMessages.push(message);
+  navigator.serviceWorker.ready
+    .then((registration) => {
+      swRegistration = registration;
+      flushPendingSWMessages();
+    })
+    .catch(() => {
+      console.warn('No active Service Worker — timer will only work in foreground');
+    });
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -394,5 +453,5 @@ export function alert(
   playSound(soundName);
 
   // Voice
-  setTimeout(() => speak(voice), 800);
+  setTimeout(() => speakWhenPossible(voice), 800);
 }

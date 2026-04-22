@@ -1,9 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { alert as wellnessAlert } from '../utils/notifications';
+import {
+  onTimerComplete,
+  onTimerTick,
+  removeTimerCallbacks,
+  startBackgroundTimer,
+  stopBackgroundTimer,
+} from '../utils/notifications';
 
 type Props = {
   onHydrationComplete?: () => void;
 };
+
+const HYDRATION_TIMER_ID = 'hydration-reminder';
 
 const HydrationTimer: React.FC<Props> = ({ onHydrationComplete }) => {
   const [minutesInput, setMinutesInput] = useState(30);
@@ -12,6 +20,7 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationComplete }) => {
   const [isAlertPlaying, setIsAlertPlaying] = useState(false);
 
   const alertFiredRef = useRef(false);
+  const minutesInputRef = useRef(minutesInput);
 
   // 🔓 Unlock speech on first click
   useEffect(() => {
@@ -24,44 +33,59 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationComplete }) => {
     return () => document.removeEventListener("click", unlock);
   }, []);
 
+  useEffect(() => {
+    minutesInputRef.current = minutesInput;
+  }, [minutesInput]);
+
   const fireHydrationAlert = useCallback(() => {
     if (alertFiredRef.current) return;
     alertFiredRef.current = true;
 
     setIsAlertPlaying(true);
 
-    // 🔔 Voice + Browser Notification
-    wellnessAlert('💧 Hydration Reminder', {
-      body: 'Time to drink water! Stay hydrated for better focus.',
-      voiceMessage: 'Time to drink water',
-      tag: 'hydration-alert',
-    });
-
     onHydrationComplete?.();
 
-    setTimeout(() => setIsAlertPlaying(false), 5000);
+    setTimeout(() => {
+      setIsAlertPlaying(false);
+      alertFiredRef.current = false;
+    }, 5000);
   }, [onHydrationComplete]);
 
   useEffect(() => {
-    if (!isRunning) return;
+    onTimerComplete(HYDRATION_TIMER_ID, () => {
+      fireHydrationAlert();
+      setTimeLeft(Math.max(1, minutesInputRef.current) * 60);
+    });
+    onTimerTick(HYDRATION_TIMER_ID, (_timerId, secondsLeft) => {
+      setTimeLeft(secondsLeft);
+    });
 
-    const interval = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          fireHydrationAlert();
+    return () => {
+      removeTimerCallbacks(HYDRATION_TIMER_ID);
+      stopBackgroundTimer(HYDRATION_TIMER_ID);
+    };
+  }, [fireHydrationAlert]);
 
-          setTimeout(() => {
-            alertFiredRef.current = false;
-          }, 2000);
+  const startHydrationReminder = useCallback(() => {
+    const safeTime = Math.max(1, minutesInput);
+    alertFiredRef.current = false;
+    setIsAlertPlaying(false);
+    setTimeLeft(safeTime * 60);
+    setIsRunning(true);
 
-          return Math.max(1, minutesInput) * 60;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [isRunning, minutesInput, fireHydrationAlert]);
+    startBackgroundTimer(
+      HYDRATION_TIMER_ID,
+      safeTime * 60_000,
+      {
+        title: '💧 Hydration Reminder',
+        body: 'Time to drink water! Stay hydrated for better focus.',
+        voiceMessage: 'Time to drink water',
+        tag: 'hydration-alert',
+        soundName: 'water-alert',
+      },
+      true
+    );
+  }, [minutesInput]);
 
   const minutes = Math.floor(timeLeft / 60);
   const seconds = timeLeft % 60;
@@ -73,9 +97,14 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationComplete }) => {
   const handleSetTime = () => {
     const safeTime = Math.max(1, minutesInput);
     setTimeLeft(safeTime * 60);
-    setIsRunning(false);
     setIsAlertPlaying(false);
     alertFiredRef.current = false;
+
+    if (isRunning) {
+      startHydrationReminder();
+    } else {
+      stopBackgroundTimer(HYDRATION_TIMER_ID);
+    }
   };
 
   return (
@@ -107,9 +136,24 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationComplete }) => {
       </div>
 
       <div>
-        <button onClick={() => setIsRunning(true)}>Start</button>
-        <button onClick={() => setIsRunning(false)}>Pause</button>
-        <button onClick={handleSetTime}>Reset</button>
+        <button onClick={startHydrationReminder}>Start</button>
+        <button
+          onClick={() => {
+            setIsRunning(false);
+            stopBackgroundTimer(HYDRATION_TIMER_ID);
+          }}
+        >
+          Pause
+        </button>
+        <button
+          onClick={() => {
+            setIsRunning(false);
+            stopBackgroundTimer(HYDRATION_TIMER_ID);
+            handleSetTime();
+          }}
+        >
+          Reset
+        </button>
       </div>
 
       <style>{`
