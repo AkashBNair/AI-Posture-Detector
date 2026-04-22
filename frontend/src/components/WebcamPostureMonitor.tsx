@@ -5,6 +5,7 @@ import { alert as wellnessAlert } from '../utils/notifications';
 
 type PostureState = 'good' | 'slouching' | 'neck_bent' | 'no_person';
 type DistanceState = 'ok' | 'too_close' | 'uncalibrated';
+type SensitivityPreset = 'relaxed' | 'balanced' | 'strict';
 
 export interface WebcamPostureMonitorProps {
   onStateChange?: (state: {
@@ -38,14 +39,46 @@ interface PostureSample {
 
 const LOCAL_STORAGE_BASELINE_KEY = 'wellness_baseline_face_width';
 const LOCAL_STORAGE_POSTURE_BASELINE_KEY = 'wellness_posture_baseline';
+const LOCAL_STORAGE_SENSITIVITY_KEY = 'wellness_posture_sensitivity';
 
 const CALIBRATION_SAMPLE_COUNT = 60;
-const SENSITIVITY_MULTIPLIER = 1.8;
 const ADAPTATION_RATE = 0.005;
-const MIN_NECK_THRESHOLD = 0.03;
-const MIN_SLOUCH_THRESHOLD = 0.05;
-
 const TOO_CLOSE_DURATION_MS = 5_000;
+
+const SENSITIVITY_CONFIG: Record<
+  SensitivityPreset,
+  {
+    label: string;
+    thresholdMultiplier: number;
+    minNeckThreshold: number;
+    minSlouchThreshold: number;
+    scoreScale: number;
+  }
+> = {
+  relaxed: {
+    label: 'Relaxed',
+    thresholdMultiplier: 2.2,
+    minNeckThreshold: 0.04,
+    minSlouchThreshold: 0.065,
+    scoreScale: 0.85,
+  },
+  balanced: {
+    label: 'Balanced',
+    thresholdMultiplier: 1.8,
+    minNeckThreshold: 0.03,
+    minSlouchThreshold: 0.05,
+    scoreScale: 1,
+  },
+  strict: {
+    label: 'Strict',
+    thresholdMultiplier: 1.4,
+    minNeckThreshold: 0.02,
+    minSlouchThreshold: 0.04,
+    scoreScale: 1.18,
+  },
+};
+
+const SENSITIVITY_OPTIONS: SensitivityPreset[] = ['relaxed', 'balanced', 'strict'];
 
 function computeMeanAndStd(values: number[]): { mean: number; std: number } {
   const n = values.length;
@@ -74,11 +107,13 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
   const [distance, setDistance] = useState<DistanceState>('uncalibrated');
   const [slouchPercent, setSlouchPercent] = useState(0);
   const [angleDeviation, setAngleDeviation] = useState(0);
+  const [sensitivity, setSensitivity] = useState<SensitivityPreset>('balanced');
   const [baselineFaceWidth, setBaselineFaceWidth] = useState<number | null>(null);
   const [isCalibrating, setIsCalibrating] = useState(true);
   const [calibrationProgress, setCalibrationProgress] = useState(0);
   const [initError, setInitError] = useState<string | null>(null);
   const baselineFaceWidthRef = useRef<number | null>(null);
+  const sensitivityRef = useRef(SENSITIVITY_CONFIG.balanced);
 
   useEffect(() => {
     onStateChange?.({
@@ -128,7 +163,21 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
         }
       } catch {}
     }
+
+    const storedSensitivity = window.localStorage.getItem(LOCAL_STORAGE_SENSITIVITY_KEY);
+    if (
+      storedSensitivity === 'relaxed' ||
+      storedSensitivity === 'balanced' ||
+      storedSensitivity === 'strict'
+    ) {
+      setSensitivity(storedSensitivity);
+    }
   }, []);
+
+  useEffect(() => {
+    sensitivityRef.current = SENSITIVITY_CONFIG[sensitivity];
+    window.localStorage.setItem(LOCAL_STORAGE_SENSITIVITY_KEY, sensitivity);
+  }, [sensitivity]);
 
   const recalibrate = useCallback(() => {
     postureBaseline = null;
@@ -204,8 +253,15 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
 
     const base = postureBaseline;
 
-    const neckThreshold = Math.max(MIN_NECK_THRESHOLD, SENSITIVITY_MULTIPLIER * base.neckStd);
-    const slouchThreshold = Math.max(MIN_SLOUCH_THRESHOLD, SENSITIVITY_MULTIPLIER * base.slouchStd);
+    const activeSensitivity = sensitivityRef.current;
+    const neckThreshold = Math.max(
+      activeSensitivity.minNeckThreshold,
+      activeSensitivity.thresholdMultiplier * base.neckStd
+    );
+    const slouchThreshold = Math.max(
+      activeSensitivity.minSlouchThreshold,
+      activeSensitivity.thresholdMultiplier * base.slouchStd
+    );
 
     const neckDelta = neck - base.neck;
     const slouchDelta = slouch - base.slouch;
@@ -237,7 +293,10 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
     const neckSeverity = Math.max(0, Math.min(2, neckDelta / neckThreshold));
     const slouchSeverity = Math.max(0, Math.min(2, (-slouchDelta) / slouchThreshold));
     const combinedSeverity = Math.min(1, (neckSeverity * 0.6 + slouchSeverity * 0.4) / 2);
-    const angleDeviationScore = combinedSeverity * 40;
+    const angleDeviationScore = Math.min(
+      40,
+      combinedSeverity * 40 * activeSensitivity.scoreScale
+    );
     const slouchScore = Math.round((angleDeviationScore / 40) * 100);
 
     return {
@@ -453,6 +512,55 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
           </div>
           <div style={{ fontSize: 13, marginTop: 6, opacity: 0.7 }}>
             {calibrationProgress}% complete
+          </div>
+        </div>
+      )}
+
+      {!isCalibrating && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 12,
+            left: 12,
+            zIndex: 10,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'flex-start',
+            gap: 6,
+            padding: '8px 10px',
+            borderRadius: 10,
+            border: '1px solid rgba(255,255,255,0.25)',
+            background: 'rgba(0,0,0,0.45)',
+            color: '#fff',
+            backdropFilter: 'blur(6px)',
+          }}
+        >
+          <div style={{ fontSize: 11, opacity: 0.85 }}>
+            Posture sensitivity: <b>{SENSITIVITY_CONFIG[sensitivity].label}</b>
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {SENSITIVITY_OPTIONS.map((option) => (
+              <button
+                key={option}
+                onClick={() => setSensitivity(option)}
+                style={{
+                  border: '1px solid rgba(255,255,255,0.3)',
+                  borderRadius: 999,
+                  padding: '4px 9px',
+                  fontSize: 10,
+                  background:
+                    option === sensitivity
+                      ? 'linear-gradient(135deg, #22c55e 0%, #84cc16 100%)'
+                      : 'rgba(15,23,42,0.75)',
+                  color: option === sensitivity ? '#052e16' : '#e5e7eb',
+                  fontWeight: option === sensitivity ? 700 : 500,
+                  cursor: 'pointer',
+                }}
+                title={`Switch to ${SENSITIVITY_CONFIG[option].label.toLowerCase()} posture sensitivity`}
+              >
+                {SENSITIVITY_CONFIG[option].label}
+              </button>
+            ))}
           </div>
         </div>
       )}
