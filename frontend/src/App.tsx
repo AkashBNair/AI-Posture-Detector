@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { WebcamPostureMonitor } from './components/WebcamPostureMonitor';
 import { PomodoroTimer } from './components/PomodoroTimer';
@@ -8,6 +8,7 @@ import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import HydrationTimer from './components/HydrationTimer';
 import { postEvent, startSession } from './api/client';
 import {
+  alert as wellnessAlert,
   requestNotificationPermission,
   registerServiceWorker,
   startAudioKeepAlive,
@@ -18,33 +19,102 @@ type PostureState = 'good' | 'slouching' | 'neck_bent' | 'no_person';
 type DistanceState = 'ok' | 'too_close' | 'uncalibrated';
 type Phase = 'idle' | 'focus' | 'short_break' | 'long_break';
 
+type PostureTimelinePoint = {
+  time: number;
+  elapsedSeconds: number;
+  slouchPercent: number;
+  smoothedSlouchPercent: number;
+  zone: 'good' | 'warning' | 'bad';
+  isPeak: boolean;
+};
+
+type HydrationLog = {
+  time: number;
+};
+
+type SessionSummary = {
+  id: number;
+  startedAt: string;
+  endedAt: string;
+  avgSlouchPercent: number;
+  worstSlouchPercent: number;
+  hydrationBreaks: number;
+};
+
+const POSTURE_SAMPLE_INTERVAL_MS = 2_000;
+const POSTURE_ROLLING_WINDOW_MS = 15 * 60_000;
+const SMOOTHING_WINDOW_POINTS = 5;
+const SLOUCH_ALERT_THRESHOLD = 60;
+const SLOUCH_ALERT_DURATION_MS = 30_000;
+const SESSION_SUMMARIES_STORAGE_KEY = 'wellness_session_summaries_v1';
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
+}
+
+function getZone(value: number): 'good' | 'warning' | 'bad' {
+  if (value <= 30) return 'good';
+  if (value <= 60) return 'warning';
+  return 'bad';
+}
+
+function summarizeSession(
+  postureTimeline: PostureTimelinePoint[],
+  hydrationLogs: HydrationLog[],
+  startedAt: number | null,
+  endedAt: number
+): SessionSummary | null {
+  if (!startedAt) return null;
+
+  const values = postureTimeline.map((point) => point.smoothedSlouchPercent);
+  if (!values.length && hydrationLogs.length === 0) return null;
+
+  const avg = values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const worst = values.length > 0 ? Math.max(...values) : 0;
+
+  return {
+    id: endedAt,
+    startedAt: new Date(startedAt).toISOString(),
+    endedAt: new Date(endedAt).toISOString(),
+    avgSlouchPercent: Number(avg.toFixed(1)),
+    worstSlouchPercent: Number(worst.toFixed(1)),
+    hydrationBreaks: hydrationLogs.length,
+  };
+}
+
 function App() {
   const [posture, setPosture] = useState<PostureState>('no_person');
   const [distance, setDistance] = useState<DistanceState>('uncalibrated');
   const [phase, setPhase] = useState<Phase>('idle');
   const [overuseMinutes, setOveruseMinutes] = useState(0);
   const [sessionId, setSessionId] = useState<number | null>(null);
+  const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
 
   const [goodPostureTime, setGoodPostureTime] = useState(0);
   const [badPostureTime, setBadPostureTime] = useState(0);
 
-  const [waterGlasses, setWaterGlasses] = useState(0);
+  const [postureTimeline, setPostureTimeline] = useState<PostureTimelinePoint[]>([]);
+  const [hydrationLogs, setHydrationLogs] = useState<HydrationLog[]>([]);
+  const [sessionSummaries, setSessionSummaries] = useState<SessionSummary[]>([]);
+  const [slouchPercent, setSlouchPercent] = useState(0);
+  const [angleDeviation, setAngleDeviation] = useState(0);
 
   const [breakSecondsLeft, setBreakSecondsLeft] = useState<number>(0);
 
-  // 🔔 Track if notification permission was granted
   const [notifEnabled, setNotifEnabled] = useState(false);
 
   const lastPostureRef = useRef<PostureState>('no_person');
   const lastDistanceRef = useRef<DistanceState>('uncalibrated');
   const overlayShownRef = useRef(false);
+  const slouchPercentRef = useRef(0);
+  const hydrationLogsRef = useRef<HydrationLog[]>([]);
+  const highSlouchSinceRef = useRef<number | null>(null);
+  const slouchAlertSentRef = useRef(false);
 
-  // 🔔 Register Service Worker immediately on mount
   useEffect(() => {
     registerServiceWorker();
   }, []);
 
-  // 🔔 Request permission + unlock audio + start keepalive on first click
   useEffect(() => {
     const handleFirstClick = async () => {
       const granted = await requestNotificationPermission();
@@ -58,7 +128,6 @@ function App() {
     return () => document.removeEventListener('click', handleFirstClick);
   }, []);
 
-  // Global error handler
   useEffect(() => {
     const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
       console.error('Unhandled promise rejection:', event.reason);
@@ -72,9 +141,17 @@ function App() {
   }, []);
 
   useEffect(() => {
-    startSession('pomodoro')
-      .then((id) => setSessionId(id))
-      .catch((err) => console.error('Failed to start session:', err));
+    try {
+      const raw = window.localStorage.getItem(SESSION_SUMMARIES_STORAGE_KEY);
+      if (!raw) return;
+
+      const parsed = JSON.parse(raw) as SessionSummary[];
+      if (Array.isArray(parsed)) {
+        setSessionSummaries(parsed.slice(0, 20));
+      }
+    } catch (error) {
+      console.warn('Failed to load saved session summaries:', error);
+    }
   }, []);
 
   useEffect(() => {
@@ -104,24 +181,140 @@ function App() {
   useEffect(() => {
     if (posture !== lastPostureRef.current && posture !== 'no_person') {
       lastPostureRef.current = posture;
-      postEvent(
-        'posture_state',
-        { state: posture, at: new Date().toISOString() },
-        sessionId
-      );
+      postEvent('posture_state', { state: posture, at: new Date().toISOString() }, sessionId);
     }
   }, [posture, sessionId]);
 
   useEffect(() => {
     if (distance !== lastDistanceRef.current && distance !== 'uncalibrated') {
       lastDistanceRef.current = distance;
-      postEvent(
-        'distance_state',
-        { state: distance, at: new Date().toISOString() },
-        sessionId
-      );
+      postEvent('distance_state', { state: distance, at: new Date().toISOString() }, sessionId);
     }
   }, [distance, sessionId]);
+
+  useEffect(() => {
+    hydrationLogsRef.current = hydrationLogs;
+  }, [hydrationLogs]);
+
+  useEffect(() => {
+    slouchPercentRef.current = slouchPercent;
+  }, [slouchPercent]);
+
+  useEffect(() => {
+    if (phase !== 'focus') return;
+
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      const elapsedSeconds = sessionStartedAt ? Math.max(0, Math.floor((now - sessionStartedAt) / 1000)) : 0;
+      const currentSlouch = clampPercent(slouchPercentRef.current);
+
+      setPostureTimeline((previous) => {
+        const withNewPoint = [
+          ...previous,
+          {
+            time: now,
+            elapsedSeconds,
+            slouchPercent: currentSlouch,
+            smoothedSlouchPercent: currentSlouch,
+            zone: getZone(currentSlouch),
+            isPeak: false,
+          },
+        ];
+
+        const cutoff = now - POSTURE_ROLLING_WINDOW_MS;
+        const rollingWindow = withNewPoint.filter((point) => point.time >= cutoff);
+
+        const smoothed = rollingWindow.map((point, index, allPoints) => {
+          const start = Math.max(0, index - SMOOTHING_WINDOW_POINTS + 1);
+          const smoothingWindow = allPoints.slice(start, index + 1);
+          const smoothedValue =
+            smoothingWindow.reduce((sum, entry) => sum + entry.slouchPercent, 0) / smoothingWindow.length;
+          const clampedSmoothedValue = clampPercent(smoothedValue);
+
+          return {
+            ...point,
+            smoothedSlouchPercent: Number(clampedSmoothedValue.toFixed(1)),
+            zone: getZone(clampedSmoothedValue),
+            isPeak: false,
+          };
+        });
+
+        return smoothed.map((point, index, allPoints) => {
+          const prev = allPoints[index - 1]?.smoothedSlouchPercent ?? -Infinity;
+          const next = allPoints[index + 1]?.smoothedSlouchPercent ?? -Infinity;
+          const isPeak =
+            point.smoothedSlouchPercent >= 60 &&
+            point.smoothedSlouchPercent > prev &&
+            point.smoothedSlouchPercent >= next;
+
+          return { ...point, isPeak };
+        });
+      });
+    }, POSTURE_SAMPLE_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, [phase, sessionStartedAt]);
+
+  useEffect(() => {
+    if (phase !== 'focus') {
+      highSlouchSinceRef.current = null;
+      slouchAlertSentRef.current = false;
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      const currentSlouch = slouchPercentRef.current;
+
+      if (posture === 'no_person' || currentSlouch <= SLOUCH_ALERT_THRESHOLD) {
+        highSlouchSinceRef.current = null;
+        slouchAlertSentRef.current = false;
+        return;
+      }
+
+      if (!highSlouchSinceRef.current) {
+        highSlouchSinceRef.current = Date.now();
+      }
+
+      const elapsed = Date.now() - highSlouchSinceRef.current;
+      if (elapsed < SLOUCH_ALERT_DURATION_MS || slouchAlertSentRef.current) {
+        return;
+      }
+
+      slouchAlertSentRef.current = true;
+      wellnessAlert('⚠️ Posture Alert', {
+        body: 'You have been slouching for over 30 seconds. Please sit upright.',
+        voiceMessage: 'Posture warning. Please sit upright now.',
+        tag: 'posture-alert',
+        soundName: 'posture-alert',
+      });
+
+      postEvent(
+        'slouch_alert_triggered',
+        {
+          slouchPercent: Number(currentSlouch.toFixed(1)),
+          threshold: SLOUCH_ALERT_THRESHOLD,
+          durationMs: SLOUCH_ALERT_DURATION_MS,
+          at: new Date().toISOString(),
+        },
+        sessionId
+      );
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [phase, posture, sessionId]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SESSION_SUMMARIES_STORAGE_KEY, JSON.stringify(sessionSummaries));
+    } catch (error) {
+      console.warn('Failed to persist session summaries:', error);
+    }
+  }, [sessionSummaries]);
+
+  const currentSessionSummary = useMemo(
+    () => summarizeSession(postureTimeline, hydrationLogs, sessionStartedAt, Date.now()),
+    [hydrationLogs, postureTimeline, sessionStartedAt]
+  );
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -132,7 +325,9 @@ function App() {
             goodPostureSeconds: goodPostureTime,
             badPostureSeconds: badPostureTime,
             overuseMinutes,
-            waterGlasses,
+            hydrationBreaks: hydrationLogs.length,
+            avgSlouchPercent: currentSessionSummary?.avgSlouchPercent ?? 0,
+            worstSlouchPercent: currentSessionSummary?.worstSlouchPercent ?? 0,
             phase,
             at: new Date().toISOString(),
           },
@@ -142,16 +337,68 @@ function App() {
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [goodPostureTime, badPostureTime, overuseMinutes, waterGlasses, phase, sessionId]);
+  }, [
+    badPostureTime,
+    currentSessionSummary?.avgSlouchPercent,
+    currentSessionSummary?.worstSlouchPercent,
+    goodPostureTime,
+    hydrationLogs.length,
+    overuseMinutes,
+    phase,
+    sessionId,
+  ]);
 
-  const handleHydrationComplete = () => {
-    setWaterGlasses((prev) => prev + 1);
+  const finalizeCurrentSession = () => {
+    const endedAt = Date.now();
+    const summary = summarizeSession(postureTimeline, hydrationLogsRef.current, sessionStartedAt, endedAt);
+    if (!summary) return;
+
+    setSessionSummaries((previous) => [summary, ...previous].slice(0, 20));
+
+    postEvent(
+      'session_summary',
+      {
+        startedAt: summary.startedAt,
+        endedAt: summary.endedAt,
+        avgSlouchPercent: summary.avgSlouchPercent,
+        worstSlouchPercent: summary.worstSlouchPercent,
+        hydrationBreaks: summary.hydrationBreaks,
+      },
+      sessionId
+    );
+  };
+
+  const handleSessionStart = () => {
+    finalizeCurrentSession();
+
+    const startedAt = Date.now();
+    setSessionStartedAt(startedAt);
+    setPostureTimeline([]);
+    setHydrationLogs([]);
+    setGoodPostureTime(0);
+    setBadPostureTime(0);
+    setBreakSecondsLeft(0);
+
+    highSlouchSinceRef.current = null;
+    slouchAlertSentRef.current = false;
+
+    startSession('pomodoro')
+      .then((id) => setSessionId(id))
+      .catch((err) => console.error('Failed to start session:', err));
+  };
+
+  const handleHydrationLogged = () => {
+    const now = Date.now();
+    const currentCount = hydrationLogsRef.current.length + 1;
+    const nextLog = { time: now };
+
+    setHydrationLogs((previous) => [...previous, nextLog]);
 
     postEvent(
       'hydration_completed',
       {
-        glassNumber: waterGlasses + 1,
-        at: new Date().toISOString(),
+        hydrationBreakNumber: currentCount,
+        at: new Date(now).toISOString(),
       },
       sessionId
     );
@@ -167,8 +414,7 @@ function App() {
           alignItems: 'center',
           justifyContent: 'flex-start',
           padding: '32px 16px 48px',
-          background:
-            'radial-gradient(circle at top left, #1e293b 0%, #020617 45%, #000 100%)',
+          background: 'radial-gradient(circle at top left, #1e293b 0%, #020617 45%, #000 100%)',
           color: '#e5e7eb',
         }}
       >
@@ -188,7 +434,6 @@ function App() {
           focused, and healthy while you study or work.
         </p>
 
-        {/* 🔔 Notification status banner */}
         {!notifEnabled && (
           <div
             style={{
@@ -216,6 +461,8 @@ function App() {
           onStateChange={(state) => {
             setPosture(state.posture);
             setDistance(state.distance);
+            setSlouchPercent(state.slouchPercent);
+            setAngleDeviation(state.angleDeviation);
           }}
         />
 
@@ -223,7 +470,7 @@ function App() {
           style={{
             marginTop: 32,
             display: 'grid',
-            gridTemplateColumns: 'minmax(0, 1.2fr) minmax(0, 1fr)',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
             gap: 20,
             width: '100%',
             maxWidth: 1120,
@@ -247,8 +494,13 @@ function App() {
             >
               <h2 style={{ fontSize: '1.1rem', marginBottom: 8 }}>Posture</h2>
               <p style={{ margin: 0, fontSize: 14, color: '#9ca3af' }}>
-                Current:{' '}
-                <strong style={{ textTransform: 'capitalize' }}>{posture}</strong>
+                Current: <strong style={{ textTransform: 'capitalize' }}>{posture}</strong>
+              </p>
+              <p style={{ margin: '8px 0 0', fontSize: 13, color: '#86efac' }}>
+                Slouch: <strong>{Math.round(slouchPercent)}%</strong>
+              </p>
+              <p style={{ margin: '4px 0 0', fontSize: 13, color: '#fcd34d' }}>
+                Angle deviation: <strong>{angleDeviation.toFixed(1)}°</strong>
               </p>
             </div>
 
@@ -262,14 +514,14 @@ function App() {
             >
               <h2 style={{ fontSize: '1.1rem', marginBottom: 8 }}>Distance</h2>
               <p style={{ margin: 0, fontSize: 14, color: '#9ca3af' }}>
-                Current:{' '}
-                <strong style={{ textTransform: 'capitalize' }}>{distance}</strong>
+                Current: <strong style={{ textTransform: 'capitalize' }}>{distance}</strong>
               </p>
             </div>
           </div>
 
           <PomodoroTimer
             onPhaseChange={(next) => setPhase(next)}
+            onSessionStart={handleSessionStart}
             onCycleComplete={(data) => {
               setOveruseMinutes(0);
 
@@ -282,6 +534,8 @@ function App() {
                     actualSeconds: data.actualSeconds,
                     goodPostureSeconds: goodPostureTime,
                     badPostureSeconds: badPostureTime,
+                    avgSlouchPercent: currentSessionSummary?.avgSlouchPercent ?? 0,
+                    worstSlouchPercent: currentSessionSummary?.worstSlouchPercent ?? 0,
                     at: new Date().toISOString(),
                   },
                   sessionId
@@ -291,7 +545,7 @@ function App() {
             onBreakTick={(secondsLeft) => setBreakSecondsLeft(secondsLeft)}
           />
 
-          <HydrationTimer onHydrationComplete={handleHydrationComplete} />
+          <HydrationTimer onHydrationLogged={handleHydrationLogged} />
         </section>
 
         <section
@@ -303,19 +557,17 @@ function App() {
             justifyContent: 'flex-end',
           }}
         >
-          <HealthTipsPanel
-            posture={posture}
-            distance={distance}
-            phase={phase}
-          />
+          <HealthTipsPanel posture={posture} distance={distance} phase={phase} />
         </section>
 
         <AnalyticsDashboard
           posture={posture}
           phase={phase}
           overuseMinutes={overuseMinutes}
-          hydrationMinutes={30}
-          waterGlasses={waterGlasses}
+          postureTimeline={postureTimeline}
+          hydrationLogs={hydrationLogs}
+          currentSessionSummary={currentSessionSummary}
+          latestCompletedSession={sessionSummaries[0] ?? null}
         />
 
         <ScreenOverlay
@@ -324,28 +576,16 @@ function App() {
           breakSecondsLeft={breakSecondsLeft}
           onOverride={() => {
             setOveruseMinutes(0);
-            postEvent(
-              'screen_block_overridden',
-              { at: new Date().toISOString() },
-              sessionId
-            );
+            postEvent('screen_block_overridden', { at: new Date().toISOString() }, sessionId);
           }}
           onTakeBreak={() => {
             setOveruseMinutes(0);
-            postEvent(
-              'break_taken',
-              { phase, at: new Date().toISOString() },
-              sessionId
-            );
+            postEvent('break_taken', { phase, at: new Date().toISOString() }, sessionId);
           }}
           onShownChange={(shown) => {
             if (shown && !overlayShownRef.current) {
               overlayShownRef.current = true;
-              postEvent(
-                'screen_block_shown',
-                { phase, at: new Date().toISOString() },
-                sessionId
-              );
+              postEvent('screen_block_shown', { phase, at: new Date().toISOString() }, sessionId);
             }
             if (!shown) {
               overlayShownRef.current = false;

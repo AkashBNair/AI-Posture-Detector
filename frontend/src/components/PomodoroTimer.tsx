@@ -13,6 +13,7 @@ export interface PomodoroTimerProps {
   onPhaseChange?: (phase: Phase) => void;
   onCycleComplete?: (data: { phase: Phase; plannedMinutes: number; actualSeconds: number }) => void;
   onBreakTick?: (secondsLeft: number) => void;
+  onSessionStart?: () => void;
 }
 
 const DEFAULT_FOCUS_MIN = 25;
@@ -25,6 +26,7 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   onPhaseChange,
   onCycleComplete,
   onBreakTick,
+  onSessionStart,
 }) => {
   const [phase, setPhase] = useState<Phase>('idle');
   const [secondsLeft, setSecondsLeft] = useState(0);
@@ -142,7 +144,10 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   };
 
   const handleStart = () => {
-    if (phase === 'idle') startPhase('focus');
+    if (phase === 'idle') {
+      onSessionStart?.();
+      startPhase('focus');
+    }
     else {
       setRunning(true);
       setPhaseStartTimestamp(Date.now());

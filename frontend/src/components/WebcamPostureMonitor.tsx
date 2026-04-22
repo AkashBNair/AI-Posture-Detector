@@ -10,6 +10,8 @@ export interface WebcamPostureMonitorProps {
   onStateChange?: (state: {
     posture: PostureState;
     distance: DistanceState;
+    slouchPercent: number;
+    angleDeviation: number;
     isCalibrating: boolean;
     calibrationProgress: number;
   }) => void;
@@ -43,7 +45,6 @@ const ADAPTATION_RATE = 0.005;
 const MIN_NECK_THRESHOLD = 0.03;
 const MIN_SLOUCH_THRESHOLD = 0.05;
 
-const BAD_POSTURE_DURATION_MS = 10_000;
 const TOO_CLOSE_DURATION_MS = 5_000;
 
 function computeMeanAndStd(values: number[]): { mean: number; std: number } {
@@ -63,16 +64,16 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const hasSpokenPostureRef = useRef(false);
   const hasSpokenDistanceRef = useRef(false);
 
-  const badPostureSinceRef = useRef<number | null>(null);
   const tooCloseSinceRef = useRef<number | null>(null);
 
   const calibrationSamplesRef = useRef<number[]>([]);
 
   const [posture, setPosture] = useState<PostureState>('no_person');
   const [distance, setDistance] = useState<DistanceState>('uncalibrated');
+  const [slouchPercent, setSlouchPercent] = useState(0);
+  const [angleDeviation, setAngleDeviation] = useState(0);
   const [baselineFaceWidth, setBaselineFaceWidth] = useState<number | null>(null);
   const [isCalibrating, setIsCalibrating] = useState(true);
   const [calibrationProgress, setCalibrationProgress] = useState(0);
@@ -80,8 +81,23 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
   const baselineFaceWidthRef = useRef<number | null>(null);
 
   useEffect(() => {
-    onStateChange?.({ posture, distance, isCalibrating, calibrationProgress });
-  }, [posture, distance, isCalibrating, calibrationProgress, onStateChange]);
+    onStateChange?.({
+      posture,
+      distance,
+      slouchPercent,
+      angleDeviation,
+      isCalibrating,
+      calibrationProgress,
+    });
+  }, [
+    posture,
+    distance,
+    slouchPercent,
+    angleDeviation,
+    isCalibrating,
+    calibrationProgress,
+    onStateChange,
+  ]);
 
   useEffect(() => {
     baselineFaceWidthRef.current = baselineFaceWidth;
@@ -122,15 +138,19 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
     baselineFaceWidthRef.current = null;
     setIsCalibrating(true);
     setCalibrationProgress(0);
-    badPostureSinceRef.current = null;
     tooCloseSinceRef.current = null;
-    hasSpokenPostureRef.current = false;
     hasSpokenDistanceRef.current = false;
+    setSlouchPercent(0);
+    setAngleDeviation(0);
     window.localStorage.removeItem(LOCAL_STORAGE_BASELINE_KEY);
     window.localStorage.removeItem(LOCAL_STORAGE_POSTURE_BASELINE_KEY);
   }, []);
 
-  function classifyPostureAdaptive(landmarks: Landmark[]): PostureState {
+  function classifyPostureAdaptive(landmarks: Landmark[]): {
+    posture: PostureState;
+    slouchPercent: number;
+    angleDeviation: number;
+  } {
     const nose = landmarks[0];
     const leftShoulder = landmarks[11];
     const rightShoulder = landmarks[12];
@@ -179,7 +199,7 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
         );
       }
 
-      return 'good';
+      return { posture: 'good', slouchPercent: 0, angleDeviation: 0 };
     }
 
     const base = postureBaseline;
@@ -214,7 +234,17 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
       }
     }
 
-    return currentPosture;
+    const neckSeverity = Math.max(0, Math.min(2, neckDelta / neckThreshold));
+    const slouchSeverity = Math.max(0, Math.min(2, (-slouchDelta) / slouchThreshold));
+    const combinedSeverity = Math.min(1, (neckSeverity * 0.6 + slouchSeverity * 0.4) / 2);
+    const angleDeviationScore = combinedSeverity * 40;
+    const slouchScore = Math.round((angleDeviationScore / 40) * 100);
+
+    return {
+      posture: currentPosture,
+      slouchPercent: slouchScore,
+      angleDeviation: Number(angleDeviationScore.toFixed(1)),
+    };
   }
 
   useEffect(() => {
@@ -248,37 +278,16 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
           if (!landmarks || !landmarks.length) {
             setPosture('no_person');
             setDistance('uncalibrated');
-            badPostureSinceRef.current = null;
             tooCloseSinceRef.current = null;
-            hasSpokenPostureRef.current = false;
             hasSpokenDistanceRef.current = false;
+            setSlouchPercent(0);
+            setAngleDeviation(0);
             return;
           }
 
           const now = Date.now();
 
-          const newPosture = classifyPostureAdaptive(landmarks);
-
-          if (newPosture === 'slouching' || newPosture === 'neck_bent') {
-            if (badPostureSinceRef.current === null) {
-              badPostureSinceRef.current = now;
-            }
-
-            const elapsed = now - badPostureSinceRef.current;
-
-            if (elapsed >= BAD_POSTURE_DURATION_MS && !hasSpokenPostureRef.current) {
-              // 🔔 Voice + Browser Notification
-              wellnessAlert('⚠️ Posture Alert', {
-                body: 'You have been slouching for a while. Please sit straight!',
-                voiceMessage: 'You have been slouching for a while, please sit straight',
-                tag: 'posture-alert',
-              });
-              hasSpokenPostureRef.current = true;
-            }
-          } else {
-            badPostureSinceRef.current = null;
-            hasSpokenPostureRef.current = false;
-          }
+          const postureMetrics = classifyPostureAdaptive(landmarks);
 
           const faceWidth = estimateFaceWidthFromPose(landmarks);
 
@@ -320,7 +329,9 @@ export const WebcamPostureMonitor: React.FC<WebcamPostureMonitorProps> = ({
             hasSpokenDistanceRef.current = false;
           }
 
-          setPosture(newPosture);
+          setPosture(postureMetrics.posture);
+          setSlouchPercent(postureMetrics.slouchPercent);
+          setAngleDeviation(postureMetrics.angleDeviation);
           setDistance(newDistance);
         });
 
