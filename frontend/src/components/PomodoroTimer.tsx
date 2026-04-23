@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   onTimerComplete,
   onTimerTick,
@@ -37,6 +37,8 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   const [running, setRunning] = useState(false);
   const [phaseStartTimestamp, setPhaseStartTimestamp] = useState<number | null>(null);
   const [phaseCompletionSignal, setPhaseCompletionSignal] = useState(0);
+  const completionHandledRef = useRef(false);
+  const localIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     onPhaseChange?.(phase);
@@ -65,6 +67,8 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
 
   useEffect(() => {
     if (phase === 'idle') return;
+    if (completionHandledRef.current) return;
+    completionHandledRef.current = true;
     handlePhaseEnd();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phaseCompletionSignal]);
@@ -93,6 +97,7 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   };
 
   const startPhaseTimer = (activePhase: Phase, durationSeconds: number) => {
+    completionHandledRef.current = false;
     startBackgroundTimer(
       POMODORO_TIMER_ID,
       durationSeconds * 1000,
@@ -136,11 +141,29 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
     if (nextPhase === 'short_break') durationMinutes = shortBreakMinutes;
     if (nextPhase === 'long_break') durationMinutes = longBreakMinutes;
 
+    const durationSeconds = durationMinutes * 60;
     setPhase(nextPhase);
-    setSecondsLeft(durationMinutes * 60);
+    setSecondsLeft(durationSeconds);
     setRunning(true);
     setPhaseStartTimestamp(Date.now());
-    startPhaseTimer(nextPhase, durationMinutes * 60);
+    startPhaseTimer(nextPhase, durationSeconds);
+
+    // Local fallback interval in case Service Worker messages stop
+    if (localIntervalRef.current) clearInterval(localIntervalRef.current);
+    localIntervalRef.current = setInterval(() => {
+      setSecondsLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(localIntervalRef.current!);
+          localIntervalRef.current = null;
+          if (!completionHandledRef.current) {
+            completionHandledRef.current = true;
+            handlePhaseEnd();
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
   };
 
   const handleStart = () => {
@@ -158,14 +181,23 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   const handlePause = () => {
     setRunning(false);
     stopBackgroundTimer(POMODORO_TIMER_ID);
+    if (localIntervalRef.current) {
+      clearInterval(localIntervalRef.current);
+      localIntervalRef.current = null;
+    }
   };
 
   const handleReset = () => {
     stopBackgroundTimer(POMODORO_TIMER_ID);
+    if (localIntervalRef.current) {
+      clearInterval(localIntervalRef.current);
+      localIntervalRef.current = null;
+    }
     setRunning(false);
     setPhase('idle');
     setSecondsLeft(0);
     setPhaseStartTimestamp(null);
+    completionHandledRef.current = false;
   };
 
   const formattedTime = useMemo(() => {

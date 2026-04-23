@@ -1,31 +1,18 @@
-# Wellness Project Fixes
+# Fix Timer & Remove Components - TODO
 
-## ✅ Completed Fixes
+## Timer Fixes
+- [x] Fix `frontend/public/sw.js` - Add KEEPALIVE handler
+- [x] Fix `frontend/src/utils/notifications.ts` - Add keepalive mechanism
+- [x] Fix `frontend/src/components/PomodoroTimer.tsx` - Add local fallback + completion guard
+- [x] Fix `frontend/src/components/HydrationTimer.tsx` - Add local fallback + completion guard
 
-1. **Added missing `__init__.py` to backend** 
-   - The backend module couldn't be imported because `backend/` wasn't recognized as a Python package
-   - Fixed by creating an empty `__init__.py` file in the backend directory
-   - This enables `python -m uvicorn backend.main:app` to work correctly
+## Component Removals
+- [x] Remove `HealthTipsPanel` from `frontend/src/App.tsx`
+- [x] Remove `AI Insight` and `Hydration Insight` from `frontend/src/components/AnalyticsDashboard.tsx`
 
-2. **Imported and integrated HydrationTimer component**
-   - HydrationTimer component existed but was not imported/used in App.tsx
-   - Added import: `import HydrationTimer from './components/HydrationTimer'`
-   - Integrated it into the main app layout next to PomodoroTimer
+## Testing
+- [ ] Build frontend to verify no TS errors
+- [ ] Test timers run past 30 seconds
 
-3. **Verified all component exports and imports**
-   - ✅ All components have proper exports (named or default)
-   - ✅ All imports match the export types
-   - ✅ No circular dependencies
-
-4. **Tested compilation and builds**
-   - ✅ TypeScript compiles with no errors
-   - ✅ Production build completes successfully
-   - ✅ Backend imports work: `from backend.main import app`
-
-## 🎬 Next Steps
-
-- [ ] Start backend: `python -m uvicorn backend.main:app --reload`
-- [ ] Start frontend: `npm start` (from frontend directory)
-- [ ] Test API integration
-- [ ] Verify webcam components work
-
+## Features
+- [x] Implement Local Interactive AI Insights (Rule-based, offline, button-driven)

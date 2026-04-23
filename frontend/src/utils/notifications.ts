@@ -173,6 +173,24 @@ const timerCompleteCallbacks: Map<string, TimerCompleteCallback> = new Map();
 const timerTickCallbacks: Map<string, TimerTickCallback> = new Map();
 const queuedSpeechMessages: string[] = [];
 
+// Track active timers to keep the Service Worker alive
+const activeTimers: Set<string> = new Set();
+let keepAliveIntervalId: ReturnType<typeof setInterval> | null = null;
+
+function startKeepAlive() {
+  if (keepAliveIntervalId) return;
+  keepAliveIntervalId = setInterval(() => {
+    sendToSW({ type: 'KEEPALIVE' });
+  }, 10_000);
+}
+
+function stopKeepAlive() {
+  if (keepAliveIntervalId && activeTimers.size === 0) {
+    clearInterval(keepAliveIntervalId);
+    keepAliveIntervalId = null;
+  }
+}
+
 function flushQueuedSpeech() {
   if (!queuedSpeechMessages.length) return;
   const latestMessage = queuedSpeechMessages[queuedSpeechMessages.length - 1];
@@ -304,6 +322,8 @@ export function startBackgroundTimer(
   alertConfig: TimerAlertConfig,
   repeat: boolean = false
 ) {
+  activeTimers.add(timerId);
+  startKeepAlive();
   sendToSW({
     type: 'START_TIMER',
     timerId,
@@ -317,7 +337,9 @@ export function startBackgroundTimer(
  * Stop a running background timer.
  */
 export function stopBackgroundTimer(timerId: string) {
+  activeTimers.delete(timerId);
   sendToSW({ type: 'STOP_TIMER', timerId });
+  stopKeepAlive();
 }
 
 /**

@@ -115,15 +115,6 @@ export const AnalyticsDashboard: React.FC<Props> = ({
 
   const eyeAlerts = overuseMinutes > 40 ? 'High' : 'Normal';
 
-  const hydrationInsight =
-    hydrationLogs.length >= 8
-      ? 'Excellent hydration rhythm this session.'
-      : hydrationLogs.length >= 4
-      ? 'Great progress. Keep the same hydration pace.'
-      : hydrationLogs.length >= 1
-      ? 'Good start. Keep logging each drink for better consistency.'
-      : 'No hydration breaks logged yet. Use the I drank water button.';
-
   const averageHydrationIntervalMinutes = useMemo(() => {
     if (hydrationLogs.length < 2) return null;
 
@@ -152,19 +143,8 @@ export const AnalyticsDashboard: React.FC<Props> = ({
 
   const peakCount = postureTimeline.filter((point) => point.isPeak).length;
 
-  let aiInsight = 'Collecting posture trend data...';
-
-  if (avgSlouch >= 60) {
-    aiInsight = 'Posture risk is high. Raise your screen and keep your shoulders back.';
-  } else if (avgSlouch >= 40) {
-    aiInsight = 'Posture is moderate. Take micro-breaks and reset your sitting position.';
-  } else if (overuseMinutes > 40) {
-    aiInsight = 'Posture looks stable, but eye strain risk is rising. Take a break now.';
-  } else if (posture === 'good') {
-    aiInsight = 'Excellent session so far. Your posture trend is in the safe zone.';
-  }
-
   const hydrationTimeline = hydrationLogs.slice(-20);
+
 
   return (
     <div
@@ -409,15 +389,6 @@ export const AnalyticsDashboard: React.FC<Props> = ({
         </div>
       </div>
 
-      <div style={insightBox}>
-        <h3 style={{ marginTop: 0 }}>AI Insight</h3>
-        <p style={{ marginBottom: 0 }}>{aiInsight}</p>
-      </div>
-
-      <div style={insightBox}>
-        <h3 style={{ marginTop: 0 }}>Hydration Insight</h3>
-        <p style={{ marginBottom: 0 }}>{hydrationInsight}</p>
-      </div>
     </div>
   );
 };
@@ -442,13 +413,4 @@ const chartBox = {
   borderRadius: 16,
   background: 'rgba(15,23,42,0.85)',
   border: '1px solid rgba(148,163,184,0.24)',
-};
-
-const insightBox = {
-  marginTop: 24,
-  padding: 16,
-  borderRadius: 16,
-  background: 'rgba(30,41,59,0.9)',
-  border: '1px solid rgba(148,163,184,0.24)',
-  textAlign: 'left' as const,
 };

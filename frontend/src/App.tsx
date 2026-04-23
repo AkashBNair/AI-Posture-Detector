@@ -3,10 +3,10 @@ import './App.css';
 import { WebcamPostureMonitor } from './components/WebcamPostureMonitor';
 import { PomodoroTimer } from './components/PomodoroTimer';
 import { ScreenOverlay } from './components/ScreenOverlay';
-import { HealthTipsPanel } from './components/HealthTipsPanel';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import HydrationTimer from './components/HydrationTimer';
 import { postEvent, startSession } from './api/client';
+import { LocalInsights } from './components/LocalInsights';
 import {
   alert as wellnessAlert,
   requestNotificationPermission,
@@ -316,6 +316,28 @@ function App() {
     [hydrationLogs, postureTimeline, sessionStartedAt]
   );
 
+  const analyticsDataForInsights = useMemo(() => {
+    const focus_sessions = sessionSummaries.length;
+    const total_focus_minutes = sessionSummaries.reduce((acc, s) => {
+      const start = new Date(s.startedAt).getTime();
+      const end = new Date(s.endedAt).getTime();
+      return acc + Math.max(0, (end - start) / 60000);
+    }, 0);
+    const posture_events = postureTimeline.filter((p) => p.isPeak).length;
+    const total_time = goodPostureTime + badPostureTime;
+    const good_posture_ratio = total_time > 0 ? goodPostureTime / total_time : 1.0;
+
+    return {
+      total_focus_minutes,
+      focus_sessions,
+      posture_events,
+      good_posture_ratio,
+      distance_events: overuseMinutes > 40 ? 6 : 0,
+      safe_distance_ratio: distance === 'too_close' ? 0.5 : 1.0,
+      hydration_breaks: hydrationLogs.length,
+    };
+  }, [sessionSummaries, postureTimeline, goodPostureTime, badPostureTime, overuseMinutes, distance, hydrationLogs.length]);
+
   useEffect(() => {
     const interval = setInterval(() => {
       if (sessionId) {
@@ -457,14 +479,17 @@ function App() {
           </div>
         )}
 
-        <WebcamPostureMonitor
-          onStateChange={(state) => {
-            setPosture(state.posture);
-            setDistance(state.distance);
-            setSlouchPercent(state.slouchPercent);
-            setAngleDeviation(state.angleDeviation);
-          }}
-        />
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '24px', alignItems: 'flex-start', justifyContent: 'center', width: '100%' }}>
+          <WebcamPostureMonitor
+            onStateChange={(state) => {
+              setPosture(state.posture);
+              setDistance(state.distance);
+              setSlouchPercent(state.slouchPercent);
+              setAngleDeviation(state.angleDeviation);
+            }}
+          />
+          <LocalInsights data={analyticsDataForInsights} />
+        </div>
 
         <section
           style={{
@@ -546,18 +571,6 @@ function App() {
           />
 
           <HydrationTimer onHydrationLogged={handleHydrationLogged} />
-        </section>
-
-        <section
-          style={{
-            marginTop: 24,
-            width: '100%',
-            maxWidth: 1120,
-            display: 'flex',
-            justifyContent: 'flex-end',
-          }}
-        >
-          <HealthTipsPanel posture={posture} distance={distance} phase={phase} />
         </section>
 
         <AnalyticsDashboard

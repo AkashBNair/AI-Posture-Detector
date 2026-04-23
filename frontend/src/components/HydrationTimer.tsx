@@ -21,6 +21,8 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationLogged }) => {
   const [lastHydrationTime, setLastHydrationTime] = useState<string | null>(null);
 
   const alertFiredRef = useRef(false);
+  const completionHandledRef = useRef(false);
+  const localIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const minutesInputRef = useRef(minutesInput);
 
   useEffect(() => {
@@ -51,6 +53,8 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationLogged }) => {
 
   useEffect(() => {
     onTimerComplete(HYDRATION_TIMER_ID, () => {
+      if (completionHandledRef.current) return;
+      completionHandledRef.current = true;
       fireHydrationAlert();
       setTimeLeft(Math.max(1, minutesInputRef.current) * 60);
     });
@@ -62,12 +66,17 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationLogged }) => {
     return () => {
       removeTimerCallbacks(HYDRATION_TIMER_ID);
       stopBackgroundTimer(HYDRATION_TIMER_ID);
+      if (localIntervalRef.current) {
+        clearInterval(localIntervalRef.current);
+        localIntervalRef.current = null;
+      }
     };
   }, [fireHydrationAlert]);
 
   const startHydrationReminder = useCallback(() => {
     const safeTime = Math.max(1, minutesInput);
     alertFiredRef.current = false;
+    completionHandledRef.current = false;
     setIsAlertPlaying(false);
     setTimeLeft(safeTime * 60);
     setIsRunning(true);
@@ -84,7 +93,24 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationLogged }) => {
       },
       true
     );
-  }, [minutesInput]);
+
+    // Local fallback interval in case Service Worker messages stop
+    if (localIntervalRef.current) clearInterval(localIntervalRef.current);
+    localIntervalRef.current = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(localIntervalRef.current!);
+          localIntervalRef.current = null;
+          if (!completionHandledRef.current) {
+            completionHandledRef.current = true;
+            fireHydrationAlert();
+          }
+          return Math.max(1, minutesInputRef.current) * 60;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }, [minutesInput, fireHydrationAlert]);
 
   const minutes = Math.floor(timeLeft / 60);
   const seconds = timeLeft % 60;
@@ -142,10 +168,14 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationLogged }) => {
 
       <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
         <button onClick={startHydrationReminder}>Start</button>
-        <button
+      <button
           onClick={() => {
             setIsRunning(false);
             stopBackgroundTimer(HYDRATION_TIMER_ID);
+            if (localIntervalRef.current) {
+              clearInterval(localIntervalRef.current);
+              localIntervalRef.current = null;
+            }
           }}
         >
           Pause
@@ -154,6 +184,10 @@ const HydrationTimer: React.FC<Props> = ({ onHydrationLogged }) => {
           onClick={() => {
             setIsRunning(false);
             stopBackgroundTimer(HYDRATION_TIMER_ID);
+            if (localIntervalRef.current) {
+              clearInterval(localIntervalRef.current);
+              localIntervalRef.current = null;
+            }
             handleSetTime();
           }}
         >

@@ -29,6 +29,10 @@ self.addEventListener('message', (event) => {
     case 'GET_TIMER_STATUS':
       sendTimerStatus(event.source);
       break;
+
+    case 'KEEPALIVE':
+      // No-op: keeps the Service Worker alive
+      break;
   }
 });
 
