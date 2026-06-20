@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "electron ."
   },
   "dependencies": {
     "@mediapipe/camera_utils": "^0.3.1675466862",
@@ -26,9 +26,20 @@
     "web-vitals": "^2.1.4"
   },
   "devDependencies": {
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": ""
+  "description": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AkashBNair/AI-Posture-Detector.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AkashBNair/AI-Posture-Detector/issues"
+  },
+  "homepage": "https://github.com/AkashBNair/AI-Posture-Detector#readme"
 }
+

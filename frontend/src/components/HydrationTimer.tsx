@@ -1,228 +1,225 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  onTimerComplete,
-  onTimerTick,
-  removeTimerCallbacks,
-  startBackgroundTimer,
-  stopBackgroundTimer,
-} from '../utils/notifications';
+import React, { useEffect, useRef, useState } from 'react';
+import { Pose, Results as PoseResults } from '@mediapipe/pose';
+import { Camera } from '@mediapipe/camera_utils';
 
-type Props = {
-  onHydrationLogged?: () => void;
-};
+type PostureState = 'good' | 'slouching' | 'neck_bent' | 'no_person';
+type DistanceState = 'ok' | 'too_close' | 'uncalibrated';
 
-const HYDRATION_TIMER_ID = 'hydration-reminder';
+interface Landmark {
+  x: number;
+  y: number;
+  z: number;
+  visibility?: number;
+}
 
-const HydrationTimer: React.FC<Props> = ({ onHydrationLogged }) => {
-  const [minutesInput, setMinutesInput] = useState(30);
-  const [timeLeft, setTimeLeft] = useState(30 * 60);
-  const [isRunning, setIsRunning] = useState(false);
-  const [isAlertPlaying, setIsAlertPlaying] = useState(false);
-  const [lastHydrationTime, setLastHydrationTime] = useState<string | null>(null);
+const LOCAL_STORAGE_BASELINE_KEY = 'wellness_baseline_face_width';
+const HYDRATION_INTERVAL = 30 * 60; // 30 minutes
 
-  const alertFiredRef = useRef(false);
-  const completionHandledRef = useRef(false);
-  const localIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const minutesInputRef = useRef(minutesInput);
+function mapMediapipePath(file: string, packageName: 'pose'): string {
+  if (file.startsWith('third_party/mediapipe/')) {
+    const relative = file.replace('third_party/mediapipe/', '');
+    return `/mediapipe/${relative}`;
+  }
+  return `/mediapipe/${packageName}/${file}`;
+}
 
+export const WebcamPostureMonitor: React.FC = () => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cameraRef = useRef<Camera | null>(null);
+
+  const lastVoicePostureRef = useRef<PostureState>('good');
+  const lastVoiceDistanceRef = useRef<DistanceState>('ok');
+
+  const [posture, setPosture] = useState<PostureState>('no_person');
+  const [distance, setDistance] = useState<DistanceState>('uncalibrated');
+  const [baselineFaceWidth, setBaselineFaceWidth] = useState<number | null>(null);
+
+  // 💧 Hydration timer (IMPROVED LIKE POMODORO)
+  const [timeLeft, setTimeLeft] = useState(HYDRATION_INTERVAL);
+  const [isHydrationRunning, setIsHydrationRunning] = useState(true);
+
+  function speak(message: string) {
+    if (!('speechSynthesis' in window)) return;
+    const speech = new SpeechSynthesisUtterance(message);
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(speech);
+  }
+
+  // unlock speech
   useEffect(() => {
     const unlock = () => {
       speechSynthesis.speak(new SpeechSynthesisUtterance(''));
       document.removeEventListener('click', unlock);
     };
-
     document.addEventListener('click', unlock);
-    return () => document.removeEventListener('click', unlock);
   }, []);
 
+  // 💧 Hydration timer logic (FIXED)
   useEffect(() => {
-    minutesInputRef.current = minutesInput;
-  }, [minutesInput]);
+    if (!isHydrationRunning) return;
 
-  const fireHydrationAlert = useCallback(() => {
-    if (alertFiredRef.current) return;
-    alertFiredRef.current = true;
-
-    setIsAlertPlaying(true);
-
-    setTimeout(() => {
-      setIsAlertPlaying(false);
-      alertFiredRef.current = false;
-    }, 5000);
-  }, []);
-
-  useEffect(() => {
-    onTimerComplete(HYDRATION_TIMER_ID, () => {
-      if (completionHandledRef.current) return;
-      completionHandledRef.current = true;
-      fireHydrationAlert();
-      setTimeLeft(Math.max(1, minutesInputRef.current) * 60);
-    });
-
-    onTimerTick(HYDRATION_TIMER_ID, (_timerId, secondsLeft) => {
-      setTimeLeft(secondsLeft);
-    });
-
-    return () => {
-      removeTimerCallbacks(HYDRATION_TIMER_ID);
-      stopBackgroundTimer(HYDRATION_TIMER_ID);
-      if (localIntervalRef.current) {
-        clearInterval(localIntervalRef.current);
-        localIntervalRef.current = null;
-      }
-    };
-  }, [fireHydrationAlert]);
-
-  const startHydrationReminder = useCallback(() => {
-    const safeTime = Math.max(1, minutesInput);
-    alertFiredRef.current = false;
-    completionHandledRef.current = false;
-    setIsAlertPlaying(false);
-    setTimeLeft(safeTime * 60);
-    setIsRunning(true);
-
-    startBackgroundTimer(
-      HYDRATION_TIMER_ID,
-      safeTime * 60_000,
-      {
-        title: '💧 Hydration Reminder',
-        body: 'Time to drink water! Stay hydrated for better focus.',
-        voiceMessage: 'Time to drink water',
-        tag: 'hydration-alert',
-        soundName: 'water-alert',
-      },
-      true
-    );
-
-    // Local fallback interval in case Service Worker messages stop
-    if (localIntervalRef.current) clearInterval(localIntervalRef.current);
-    localIntervalRef.current = setInterval(() => {
+    const interval = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
-          clearInterval(localIntervalRef.current!);
-          localIntervalRef.current = null;
-          if (!completionHandledRef.current) {
-            completionHandledRef.current = true;
-            fireHydrationAlert();
-          }
-          return Math.max(1, minutesInputRef.current) * 60;
+          speak("Time to drink water");
+          return HYDRATION_INTERVAL;
         }
         return prev - 1;
       });
     }, 1000);
-  }, [minutesInput, fireHydrationAlert]);
 
+    return () => clearInterval(interval);
+  }, [isHydrationRunning]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const pose = new Pose({
+      locateFile: (file) => mapMediapipePath(file, 'pose'),
+    });
+
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+    });
+
+    pose.onResults((results: PoseResults) => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const landmarks = results.poseLandmarks as Landmark[];
+
+      if (!landmarks) return;
+
+      const newPosture = classifyPosture(landmarks);
+
+      if (
+        (newPosture === 'slouching' || newPosture === 'neck_bent') &&
+        lastVoicePostureRef.current === 'good'
+      ) {
+        speak("Sit straight");
+      }
+      lastVoicePostureRef.current = newPosture;
+
+      const faceWidth = estimateFaceWidthFromPose(landmarks);
+
+      if (!baselineFaceWidth && faceWidth > 0) {
+        setBaselineFaceWidth(faceWidth);
+      }
+
+      const newDistance = classifyDistance(faceWidth, baselineFaceWidth);
+
+      if (
+        newDistance === 'too_close' &&
+        lastVoiceDistanceRef.current !== 'too_close'
+      ) {
+        speak("You are too close to the screen");
+      }
+      lastVoiceDistanceRef.current = newDistance;
+
+      setPosture(newPosture);
+      setDistance(newDistance);
+    });
+
+    const camera = new Camera(video, {
+      onFrame: async () => {
+        await pose.send({ image: video });
+      },
+      width: 640,
+      height: 480,
+    });
+
+    camera.start();
+
+    return () => {
+      camera.stop();
+      pose.close();
+    };
+  }, [baselineFaceWidth]);
+
+  // ⏱️ format timer
   const minutes = Math.floor(timeLeft / 60);
   const seconds = timeLeft % 60;
-
   const formattedTime = `${minutes.toString().padStart(2, '0')}:${seconds
     .toString()
     .padStart(2, '0')}`;
 
-  const handleSetTime = () => {
-    const safeTime = Math.max(1, minutesInput);
-    setTimeLeft(safeTime * 60);
-    setIsAlertPlaying(false);
-    alertFiredRef.current = false;
-
-    if (isRunning) {
-      startHydrationReminder();
-    } else {
-      stopBackgroundTimer(HYDRATION_TIMER_ID);
-    }
-  };
-
-  const handleHydrationLogged = () => {
-    const now = new Date();
-    setLastHydrationTime(now.toLocaleTimeString());
-    onHydrationLogged?.();
-  };
-
   return (
-    <div style={{ marginTop: 20 }}>
-      <h2>💧 Hydration Timer</h2>
+    <div>
+      <video ref={videoRef} style={{ display: 'none' }} />
+      <canvas ref={canvasRef} width={640} height={480} />
 
-      <h1
-        style={{
-          fontSize: '40px',
-          color: isAlertPlaying ? '#38bdf8' : undefined,
-          animation: isAlertPlaying ? 'pulse 0.6s ease-in-out 3' : undefined,
-        }}
-      >
-        {isAlertPlaying ? '💧 Drink Water! 💧' : formattedTime}
-      </h1>
-
-      <div style={{ marginBottom: 10 }}>
-        <input
-          type="number"
-          value={minutesInput}
-          onChange={(e) => setMinutesInput(Number(e.target.value))}
-          min={1}
-          style={{ width: 60, marginRight: 10 }}
-        />
-        <span> minutes</span>
-        <button onClick={handleSetTime} style={{ marginLeft: 10 }}>
-          Set
-        </button>
+      <div>
+        <h3>Posture: {posture}</h3>
+        <h3>Distance: {distance}</h3>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
-        <button onClick={startHydrationReminder}>Start</button>
-      <button
-          onClick={() => {
-            setIsRunning(false);
-            stopBackgroundTimer(HYDRATION_TIMER_ID);
-            if (localIntervalRef.current) {
-              clearInterval(localIntervalRef.current);
-              localIntervalRef.current = null;
-            }
-          }}
-        >
-          Pause
-        </button>
-        <button
-          onClick={() => {
-            setIsRunning(false);
-            stopBackgroundTimer(HYDRATION_TIMER_ID);
-            if (localIntervalRef.current) {
-              clearInterval(localIntervalRef.current);
-              localIntervalRef.current = null;
-            }
-            handleSetTime();
-          }}
-        >
-          Reset
-        </button>
-        <button
-          onClick={handleHydrationLogged}
-          style={{
-            background: 'linear-gradient(135deg, #0ea5e9 0%, #22d3ee 100%)',
-            border: 'none',
-            color: '#082f49',
-            fontWeight: 700,
-            padding: '8px 14px',
-            borderRadius: 999,
-            cursor: 'pointer',
-          }}
-        >
-          I drank water
-        </button>
+      {/* 💧 Hydration Timer UI */}
+      <div style={{ marginTop: 20, fontSize: 20 }}>
+        💧 Hydration Timer: {formattedTime}
       </div>
 
-      {lastHydrationTime && (
-        <p style={{ marginTop: 10, fontSize: 12, color: '#9ca3af' }}>
-          Last hydration logged at {lastHydrationTime}
-        </p>
-      )}
+      {/* ✅ NEW CONTROLS (like Pomodoro) */}
+      <button onClick={() => setIsHydrationRunning(!isHydrationRunning)}>
+        {isHydrationRunning ? "Pause" : "Start"}
+      </button>
 
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; transform: scale(1); }
-          50% { opacity: 0.7; transform: scale(1.05); }
-        }
-      `}</style>
+      <button onClick={() => setTimeLeft(HYDRATION_INTERVAL)}>
+        Reset
+      </button>
     </div>
   );
 };
 
-export default HydrationTimer;
+// ===== SAME LOGIC =====
+
+function classifyPosture(landmarks: Landmark[]): PostureState {
+  const nose = landmarks[0];
+  const leftShoulder = landmarks[11];
+  const rightShoulder = landmarks[12];
+  const leftEar = landmarks[7];
+  const rightEar = landmarks[8];
+
+  if (!nose || !leftShoulder || !rightShoulder) {
+    return 'no_person';
+  }
+
+  const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2;
+
+  if (nose.y - shoulderMidY > -0.04) {
+    return 'neck_bent';
+  }
+
+  if (leftEar && rightEar) {
+    const shoulderMidZ = (leftShoulder.z + rightShoulder.z) / 2;
+    const earMidZ = (leftEar.z + rightEar.z) / 2;
+    if (earMidZ - shoulderMidZ < -0.12) {
+      return 'slouching';
+    }
+  }
+
+  return 'good';
+}
+
+function estimateFaceWidthFromPose(landmarks: Landmark[]): number {
+  const leftEar = landmarks[7];
+  const rightEar = landmarks[8];
+  if (!leftEar || !rightEar) return 0;
+
+  const dx = rightEar.x - leftEar.x;
+  const dy = rightEar.y - leftEar.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function classifyDistance(faceWidth: number, baseline: number | null): DistanceState {
+  if (!baseline) return 'uncalibrated';
+  if (!faceWidth) return 'ok';
+
+  const ratio = faceWidth / baseline;
+  return ratio > 1.18 ? 'too_close' : 'ok';
+}
